@@ -86,22 +86,6 @@ void initializeDockStatuses(DockStatus dockStatuses[], Dock docks[], int numDock
     }
 }
 
-void printShipRequests(ShipRequest shipRequests[], int numRequests) {
-    for (int i = 0; i < numRequests; i++) {
-        printf("Ship ID: %d, Direction: %d, Category: %d, Cargo Items: %d\n",
-            shipRequests[i].shipId,
-            shipRequests[i].direction,
-            shipRequests[i].shipCategory,
-            shipRequests[i].numCargoItems);
-    }
-}
-
-void updateShipWaitingTimes(ShipRequest shipRequests[], int numRequests) {
-    for (int i = 0; i < numRequests; i++) {
-        shipRequests[i].currentWaitingTime++;
-    }
-}
-
 int main(int argc, char* argv[]) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <testcase_number>\n", argv[0]);
@@ -122,15 +106,69 @@ int main(int argc, char* argv[]) {
     Dock docks[MAX_DOCKS];
 
     fscanf(file, "%d", &shmKey);
+    
     fscanf(file, "%d", &mainMsgQueueKey);
     fscanf(file, "%d", &numSolvers);
+
+    printf("📨 Main Message Queue Key: %d\n", mainMsgQueueKey);
+    printf("🧠 Number of Solver Queues: %d\n", numSolvers);
+
     for (int i = 0; i < numSolvers; i++) {
         fscanf(file, "%d", &solverQueueKeys[i]);
     }
+    printf("🧩 Solver Message Queue Keys: ");
+    for (int i = 0; i < numSolvers; i++) {
+        printf("%d ", solverQueueKeys[i]);
+    }
+    printf("\n");
 
     fscanf(file, "%d", &numDocks);
+    printf("🚢 Number of Docks: %d\n", numDocks);
+
+    int ch;
+    while ((ch = fgetc(file)) != '\n' && ch != EOF);
+
+    DockStatus dockStatuses[MAX_DOCKS];
+
     for (int i = 0; i < numDocks; i++) {
-        fscanf(file, "%d %d", &docks[i].id, &docks[i].category);
+        dockStatuses[i].dockId = i + 1;
+        dockStatuses[i].isOccupied = 0;
+        dockStatuses[i].shipId = -1;
+        dockStatuses[i].shipDirection = -1;
+        dockStatuses[i].cargoHandled = 0;
+        dockStatuses[i].cargoTotal = 0;
+
+        char line[256];
+        if (fgets(line, sizeof(line), file) == NULL) {
+            fprintf(stderr, "Error reading dock line %d\n", i + 1);
+            exit(1);
+        }
+
+        char* token = strtok(line, " \t\n");
+        int count = 0;
+        while (token != NULL) {
+            int val = atoi(token);
+            if (count == 0) {
+                dockStatuses[i].maxShipCategory = val;  // First number is category
+            } else {
+                dockStatuses[i].craneCapacities[count - 1] = val;
+            }
+            count++;
+            token = strtok(NULL, " \t\n");
+        }
+        dockStatuses[i].numCranes = count - 1;  // Exclude the category
+    }
+
+    printf("🛠️  Dock Details:\n");
+    for (int i = 0; i < numDocks; i++) {
+        printf("    - Dock ID: %d | Category: %d | Cranes (%d): ",
+               dockStatuses[i].dockId,
+               dockStatuses[i].maxShipCategory,
+               dockStatuses[i].numCranes);
+        for (int j = 0; j < dockStatuses[i].numCranes; j++) {
+            printf("%d ", dockStatuses[i].craneCapacities[j]);
+        }
+        printf("\n");
     }
 
     fclose(file);
@@ -165,7 +203,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    DockStatus dockStatuses[MAX_DOCKS];
     initializeDockStatuses(dockStatuses, docks, numDocks);
 
     printf("✔️ IPC mechanisms set up successfully.\n");
@@ -173,8 +210,13 @@ int main(int argc, char* argv[]) {
     int timestep = 0;
     printf("🚢 Starting scheduling loop...\n");
 
+    ShipRequest waitingShips[100];
+    int waitingCount = 0;
+    
+    int lastTimestep = -1;
+    timestep = sharedMemory->timestep;
+
     while (1) {
-        timestep = sharedMemory->timestep;
         printf("⏳ Timestep: %d | Num Requests: %d\n", timestep, sharedMemory->numShipRequests);
         int numRequests = sharedMemory->numShipRequests;
 
@@ -183,30 +225,43 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        ShipRequest activeShips[100];
-        int count = 0;
+        // Add new arrivals to waitingShips
         for (int i = 0; i < numRequests; i++) {
-            ShipRequest* req = &sharedMemory->newShipRequests[i];
-            activeShips[count++] = *req;
-            
-            printf("📦 Timestep %d: Received Ship ID=%d | Cat=%d | Dir=%d | Cargo=%d\n",
-            timestep, req->shipId, req->shipCategory, req->direction, req->numCargoItems);
+            waitingShips[waitingCount++] = sharedMemory->newShipRequests[i];
         }
 
-        for (int i = 0; i < count - 1; i++) {
-            for (int j = i + 1; j < count; j++) {
-                if ((activeShips[i].shipCategory > activeShips[j].shipCategory) ||
-                    (activeShips[i].shipCategory == activeShips[j].shipCategory &&
-                     activeShips[i].currentWaitingTime < activeShips[j].currentWaitingTime)) {
-                    ShipRequest temp = activeShips[i];
-                    activeShips[i] = activeShips[j];
-                    activeShips[j] = temp;
+        // Update waiting times
+        for (int i = 0; i < waitingCount; i++) {
+            waitingShips[i].currentWaitingTime++;
+        }
+
+        // Remove expired ships
+        int newWaitingCount = 0;
+        for (int i = 0; i < waitingCount; i++) {
+            if (waitingShips[i].currentWaitingTime <= waitingShips[i].maxWaitingTime) {
+                waitingShips[newWaitingCount++] = waitingShips[i];
+            } else {
+                printf("❌ Ship %d expired and was removed\n", waitingShips[i].shipId);
+            }
+        }
+        waitingCount = newWaitingCount;
+
+        // Sort waitingShips based on FCFS and priority logic
+        for (int i = 0; i < waitingCount - 1; i++) {
+            for (int j = i + 1; j < waitingCount; j++) {
+                if ((waitingShips[i].shipCategory > waitingShips[j].shipCategory) ||
+                    (waitingShips[i].shipCategory == waitingShips[j].shipCategory &&
+                     waitingShips[i].currentWaitingTime < waitingShips[j].currentWaitingTime)) {
+                    ShipRequest temp = waitingShips[i];
+                    waitingShips[i] = waitingShips[j];
+                    waitingShips[j] = temp;
                 }
             }
         }
 
-        for (int i = 0; i < count; i++) {
-            ShipRequest* ship = &activeShips[i];
+        // Assign ships to docks
+        for (int i = 0; i < waitingCount; i++) {
+            ShipRequest* ship = &waitingShips[i];
             int assigned = 0;
 
             for (int j = 0; j < numDocks; j++) {
@@ -226,8 +281,8 @@ int main(int argc, char* argv[]) {
                     msg.dockId = dock->dockId;
                     msg.shipId = ship->shipId;
                     msg.direction = ship->direction;
-                    msg.craneId = -1;  // will be used later
-                    msg.cargoId = -1;  // will be used later
+                    msg.craneId = -1;
+                    msg.cargoId = -1;
                     memset(msg.padding, 0, sizeof(msg.padding));
 
                     if (msgsnd(mainMsgQueueId, &msg, sizeof(msg) - sizeof(long), 0) == -1) {
@@ -248,8 +303,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        updateShipWaitingTimes(sharedMemory->newShipRequests, sharedMemory->numShipRequests);
-        
         MessageStruct endOfTimestepMsg;
         endOfTimestepMsg.mtype = 5;
 
@@ -257,13 +310,15 @@ int main(int argc, char* argv[]) {
             perror("❌ Failed to notify validation of timestep completion");
         } else {
             printf("✅ Notified validation of timestep %d completion\n", timestep);
+            timestep++;
         }
 
-
+        while (sharedMemory->timestep == lastTimestep) {
+            usleep(1000);  // Sleep for 1ms
+        }
+        
         sleep(1);
     }
 
     return 0;
 }
-
-
