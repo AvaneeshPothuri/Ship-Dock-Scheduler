@@ -52,12 +52,58 @@ typedef struct {
     char authStrings[MAX_DOCKS][MAX_AUTH_STRING_LEN];
 } SharedMemory;
 
+typedef struct {
+    ShipRequest request;
+    int isEmergency;
+} ScheduledShip;
+
 int shmId;
 SharedMemory* shmPtr = NULL;
 
 int mainMsgqId;
 int solverMsgqIds[MAX_SOLVERS];
 int numSolvers;
+
+ScheduledShip allShips[MAX_SHIPS];
+int totalShips = 0;
+
+void loadShipsFromFile(const char* filePath, int isEmergency) {
+    FILE* fp = fopen(filePath, "r");
+    if (!fp) {
+        fprintf(stderr, "❌ Failed to open %s\n", filePath);
+        exit(EXIT_FAILURE);
+    }
+
+    while (!feof(fp)) {
+        ShipRequest req;
+        int cargoCount;
+
+        if (fscanf(fp, "%d %d %d %d", &req.shipId, &req.category, &req.direction, &cargoCount) != 4)
+            break;
+
+        req.numCargoItems = cargoCount;
+
+        for (int i = 0; i < cargoCount; i++) {
+            if (fscanf(fp, "%d", &req.cargoIds[i]) != 1) break;
+        }
+        for (int i = 0; i < cargoCount; i++) {
+            if (fscanf(fp, "%d", &req.cargoWeights[i]) != 1) break;
+        }
+
+        req.waitingTime = 0;
+
+        allShips[totalShips].request = req;
+        allShips[totalShips].isEmergency = isEmergency;
+        totalShips++;
+
+        if (totalShips >= MAX_SHIPS) {
+            fprintf(stderr, "⚠️ Ship list full (MAX_SHIPS = %d)\n", MAX_SHIPS);
+            break;
+        }
+    }
+
+    fclose(fp);
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -135,6 +181,21 @@ int main(int argc, char* argv[]) {
     }
 
     printf("\n🎉 IPC Setup Complete! Ready to proceed.\n");
+
+    char emergencyFile[100], normalFile[100];
+    snprintf(emergencyFile, sizeof(emergencyFile), "testcase%d/emergency_ships.txt", testcaseNum);
+    snprintf(normalFile, sizeof(normalFile), "testcase%d/normal_ships.txt", testcaseNum);
+
+    loadShipsFromFile(emergencyFile, 1);
+    loadShipsFromFile(normalFile, 0);
+
+    int emergencyCount = 0;
+    for (int i = 0; i < totalShips; i++) {
+        if (allShips[i].isEmergency) emergencyCount++;
+    }
+
+    printf("✅ Loaded %d total ships (%d emergency, %d normal)\n",
+        totalShips, emergencyCount, totalShips - emergencyCount);
 
     return 0;
 }
