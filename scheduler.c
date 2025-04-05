@@ -8,28 +8,61 @@
 #include <unistd.h>
 #include <errno.h>
 
-#define MAX_AUTH_STRING_LEN 100
-#define MAX_SOLVERS 10
 #define MAX_DOCKS 100
-#define MAX_CARGO 100
-#define MAX_SHIPS 100
+#define MAX_SOLVERS 100
+
+typedef struct {
+    int id;
+    int category;
+} Dock;
 
 typedef struct {
     long mtype;
+    int timestep;
+    int numShipRequests;
     int dockId;
     int shipId;
     int direction;
-    int cargoId;
     int craneId;
-    int timestep;
-    int isFinished;
-    int numShipRequests;
+    int cargoId;
+    char padding[200];
 } MessageStruct;
+
+typedef struct {
+    int dockId;
+    int numCranes;
+    int craneCapacities[10];
+    int maxShipCategory;
+    int isOccupied;
+    int shipId;
+    int shipDirection;
+    int cargoHandled;
+    int cargoTotal;
+} DockStatus;
+
+typedef struct {
+    int shipId;
+    int direction;
+    int shipCategory;
+    int numCargoItems;
+    int cargoWeights[10];
+    int maxWaitingTime;
+    int currentWaitingTime;
+    char authString[10];
+} ShipRequest;
+
+typedef struct {
+    int timestep;
+    int numShipRequests;
+    ShipRequest newShipRequests[100];
+    DockStatus dockStatuses[100];
+    char authStrings[100][10];
+} MainSharedMemory;
 
 typedef struct {
     long mtype;
     int dockId;
-    char authStringGuess[MAX_AUTH_STRING_LEN];
+    char authStringGuess[10];
 } SolverRequest;
 
 typedef struct {
@@ -37,165 +70,80 @@ typedef struct {
     int guessIsCorrect;
 } SolverResponse;
 
-typedef struct {
-    int shipId;
-    int category;
-    int direction;
-    int numCargoItems;
-    int cargoIds[MAX_CARGO];
-    int cargoWeights[MAX_CARGO];
-    int waitingTime;
-} ShipRequest;
-
-typedef struct {
-    ShipRequest newShipRequests[MAX_SHIPS];
-    char authStrings[MAX_DOCKS][MAX_AUTH_STRING_LEN];
-} SharedMemory;
-
-typedef struct {
-    ShipRequest request;
-    int isEmergency;
-} ScheduledShip;
-
-int shmId;
-SharedMemory* shmPtr = NULL;
-
-int mainMsgqId;
-int solverMsgqIds[MAX_SOLVERS];
-int numSolvers;
-
-ScheduledShip allShips[MAX_SHIPS];
-int totalShips = 0;
-
-void loadShipsFromFile(const char* filePath, int isEmergency) {
-    FILE* fp = fopen(filePath, "r");
-    if (!fp) {
-        fprintf(stderr, "❌ Failed to open %s\n", filePath);
-        exit(EXIT_FAILURE);
-    }
-
-    while (!feof(fp)) {
-        ShipRequest req;
-        int cargoCount;
-
-        if (fscanf(fp, "%d %d %d %d", &req.shipId, &req.category, &req.direction, &cargoCount) != 4)
-            break;
-
-        req.numCargoItems = cargoCount;
-
-        for (int i = 0; i < cargoCount; i++) {
-            if (fscanf(fp, "%d", &req.cargoIds[i]) != 1) break;
-        }
-        for (int i = 0; i < cargoCount; i++) {
-            if (fscanf(fp, "%d", &req.cargoWeights[i]) != 1) break;
-        }
-
-        req.waitingTime = 0;
-
-        allShips[totalShips].request = req;
-        allShips[totalShips].isEmergency = isEmergency;
-        totalShips++;
-
-        if (totalShips >= MAX_SHIPS) {
-            fprintf(stderr, "⚠️ Ship list full (MAX_SHIPS = %d)\n", MAX_SHIPS);
-            break;
-        }
-    }
-
-    fclose(fp);
-}
-
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
+    if (argc != 2) {
         fprintf(stderr, "Usage: %s <testcase_number>\n", argv[0]);
-        return EXIT_FAILURE;
-    }
-
-    int testcaseNum = atoi(argv[1]);
-    char inputFilePath[100];
-    snprintf(inputFilePath, sizeof(inputFilePath), "testcase%d/input.txt", testcaseNum);
-
-    FILE *fp = fopen(inputFilePath, "r");
-    if (!fp) {
-        perror("Error opening input.txt");
         exit(EXIT_FAILURE);
     }
 
-    key_t shmKey, mainMsgqKey, solverMsgqKeys[MAX_SOLVERS];
+    char inputPath[256];
+    snprintf(inputPath, sizeof(inputPath), "testcase%s/input.txt", argv[1]);
 
-    if (fscanf(fp, "%d", &shmKey) != 1 ||
-        fscanf(fp, "%d", &mainMsgqKey) != 1 ||
-        fscanf(fp, "%d", &numSolvers) != 1) {
-        fprintf(stderr, "Error reading keys from %s\n", inputFilePath);
-        fclose(fp);
+    FILE* file = fopen(inputPath, "r");
+    if (!file) {
+        perror("Failed to open input.txt");
         exit(EXIT_FAILURE);
     }
 
-    if (numSolvers > MAX_SOLVERS) {
-        fprintf(stderr, "Too many solvers: %d (max is %d)\n", numSolvers, MAX_SOLVERS);
-        fclose(fp);
-        exit(EXIT_FAILURE);
-    }
+    key_t shmKey, mainMsgQueueKey, solverQueueKeys[MAX_SOLVERS];
+    int numSolvers, numDocks;
+    Dock docks[MAX_DOCKS];
 
+    fscanf(file, "%d", &shmKey);
+    fscanf(file, "%d", &mainMsgQueueKey);
+    fscanf(file, "%d", &numSolvers);
     for (int i = 0; i < numSolvers; i++) {
-        if (fscanf(fp, "%d", &solverMsgqKeys[i]) != 1) {
-            fprintf(stderr, "Error reading solver message queue key %d\n", i);
-            fclose(fp);
-            exit(EXIT_FAILURE);
-        }
+        fscanf(file, "%d", &solverQueueKeys[i]);
     }
 
-    fclose(fp);
+    fscanf(file, "%d", &numDocks);
+    for (int i = 0; i < numDocks; i++) {
+        fscanf(file, "%d %d", &docks[i].id, &docks[i].category);
+    }
 
-    shmId = shmget(shmKey, 0, 0666);
+    fclose(file);
+
+    printf("✔️ input.txt read successfully from %s\n", inputPath);
+    printf("Shared Memory Key: %d\n", shmKey);
+    printf("Main Message Queue Key: %d\n", mainMsgQueueKey);
+    printf("Number of Solvers: %d\n", numSolvers);
+    for (int i = 0; i < numSolvers; i++) {
+        printf("Solver %d Queue Key: %d\n", i, solverQueueKeys[i]);
+    }
+    printf("Number of Docks: %d\n", numDocks);
+    for (int i = 0; i < numDocks; i++) {
+        printf("Dock ID: %d, Category: %d\n", docks[i].id, docks[i].category);
+    }
+
+    int shmId = shmget(shmKey, sizeof(MainSharedMemory), 0666);
     if (shmId == -1) {
-        perror("shmget failed (check if validation.out is running)");
-        exit(1);
-    } else {
-        printf("Got shmid = %d\n", shmId);
-    }
-
-    shmPtr = (SharedMemory*) shmat(shmId, NULL, 0);
-    if (shmPtr == (void*) -1) {
-        perror("shmat failed");
+        perror("Failed to get shared memory segment");
         exit(EXIT_FAILURE);
     }
 
-    printf("✅ Attached to shared memory (shmId: %d)\n", shmId);
-
-    mainMsgqId = msgget(mainMsgqKey, 0666);
-    if (mainMsgqId == -1) {
-        perror("msgget for validation queue failed");
+    MainSharedMemory* sharedMemory = (MainSharedMemory*)shmat(shmId, NULL, 0);
+    if (sharedMemory == (void*)-1) {
+        perror("Failed to attach shared memory");
         exit(EXIT_FAILURE);
     }
 
-    printf("✅ Connected to main message queue (id: %d)\n", mainMsgqId);
+    int mainMsgQueueId = msgget(mainMsgQueueKey, 0666);
+    if (mainMsgQueueId == -1) {
+        perror("Failed to get main message queue");
+        exit(EXIT_FAILURE);
+    }
 
+    int solverQueueIds[MAX_SOLVERS];
     for (int i = 0; i < numSolvers; i++) {
-        solverMsgqIds[i] = msgget(solverMsgqKeys[i], 0666);
-        if (solverMsgqIds[i] == -1) {
-            fprintf(stderr, "msgget failed for solver %d (key: %d): %s\n", i, solverMsgqKeys[i], strerror(errno));
+        solverQueueIds[i] = msgget(solverQueueKeys[i], 0666);
+        if (solverQueueIds[i] == -1) {
+            fprintf(stderr, "Failed to get solver message queue %d\n", i);
             exit(EXIT_FAILURE);
         }
-        printf("✅ Connected to solver %d message queue (id: %d)\n", i, solverMsgqIds[i]);
     }
 
-    printf("\n🎉 IPC Setup Complete! Ready to proceed.\n");
-
-    char emergencyFile[100], normalFile[100];
-    snprintf(emergencyFile, sizeof(emergencyFile), "testcase%d/emergency_ships.txt", testcaseNum);
-    snprintf(normalFile, sizeof(normalFile), "testcase%d/normal_ships.txt", testcaseNum);
-
-    loadShipsFromFile(emergencyFile, 1);
-    loadShipsFromFile(normalFile, 0);
-
-    int emergencyCount = 0;
-    for (int i = 0; i < totalShips; i++) {
-        if (allShips[i].isEmergency) emergencyCount++;
-    }
-
-    printf("✅ Loaded %d total ships (%d emergency, %d normal)\n",
-        totalShips, emergencyCount, totalShips - emergencyCount);
+    printf("✔️ IPC mechanisms set up successfully.\n");
+    printf("Scheduler setup complete. Ready to start scheduling loop...\n");
 
     return 0;
 }
