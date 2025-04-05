@@ -135,17 +135,8 @@ int main(int argc, char* argv[]) {
 
     fclose(file);
 
-    printf("\u2714\ufe0f input.txt read successfully from %s\n", inputPath);
-    printf("Shared Memory Key: %d\n", shmKey);
-    printf("Main Message Queue Key: %d\n", mainMsgQueueKey);
-    printf("Number of Solvers: %d\n", numSolvers);
-    for (int i = 0; i < numSolvers; i++) {
-        printf("Solver %d Queue Key: %d\n", i, solverQueueKeys[i]);
-    }
-    printf("Number of Docks: %d\n", numDocks);
-    for (int i = 0; i < numDocks; i++) {
-        printf("Dock ID: %d, Category: %d\n", docks[i].id, docks[i].category);
-    }
+    printf("✔️ input.txt read successfully from %s\n", inputPath);
+    printf("IPC setup starting...\n");
 
     int shmId = shmget(shmKey, sizeof(MainSharedMemory), 0666);
     if (shmId == -1) {
@@ -177,11 +168,102 @@ int main(int argc, char* argv[]) {
     DockStatus dockStatuses[MAX_DOCKS];
     initializeDockStatuses(dockStatuses, docks, numDocks);
 
-    printf("\u2714\ufe0f IPC mechanisms set up successfully.\n");
-    printf("Scheduler setup complete. Ready to start scheduling loop...\n");
+    printf("✔️ IPC mechanisms set up successfully.\n");
 
-    printShipRequests(sharedMemory->newShipRequests, sharedMemory->numShipRequests);
+    int timestep = 0;
+    printf("🚢 Starting scheduling loop...\n");
+
+    while (1) {
+        timestep = sharedMemory->timestep;
+        printf("⏳ Timestep: %d | Num Requests: %d\n", timestep, sharedMemory->numShipRequests);
+        int numRequests = sharedMemory->numShipRequests;
+
+        if (numRequests == 0 && timestep > 0) {
+            printf("⏹️  No more ship requests. Terminating.\n");
+            break;
+        }
+
+        ShipRequest activeShips[100];
+        int count = 0;
+        for (int i = 0; i < numRequests; i++) {
+            ShipRequest* req = &sharedMemory->newShipRequests[i];
+            activeShips[count++] = *req;
+            
+            printf("📦 Timestep %d: Received Ship ID=%d | Cat=%d | Dir=%d | Cargo=%d\n",
+            timestep, req->shipId, req->shipCategory, req->direction, req->numCargoItems);
+        }
+
+        for (int i = 0; i < count - 1; i++) {
+            for (int j = i + 1; j < count; j++) {
+                if ((activeShips[i].shipCategory > activeShips[j].shipCategory) ||
+                    (activeShips[i].shipCategory == activeShips[j].shipCategory &&
+                     activeShips[i].currentWaitingTime < activeShips[j].currentWaitingTime)) {
+                    ShipRequest temp = activeShips[i];
+                    activeShips[i] = activeShips[j];
+                    activeShips[j] = temp;
+                }
+            }
+        }
+
+        for (int i = 0; i < count; i++) {
+            ShipRequest* ship = &activeShips[i];
+            int assigned = 0;
+
+            for (int j = 0; j < numDocks; j++) {
+                DockStatus* dock = &dockStatuses[j];
+
+                if (!dock->isOccupied && dock->maxShipCategory >= ship->shipCategory) {
+                    dock->isOccupied = 1;
+                    dock->shipId = ship->shipId;
+                    dock->shipDirection = ship->direction;
+                    dock->cargoTotal = ship->numCargoItems;
+                    strncpy(sharedMemory->authStrings[dock->dockId], ship->authString, 10);
+
+                    MessageStruct msg;
+                    msg.mtype = 1;
+                    msg.timestep = timestep;
+                    msg.numShipRequests = 1;
+                    msg.dockId = dock->dockId;
+                    msg.shipId = ship->shipId;
+                    msg.direction = ship->direction;
+                    msg.craneId = -1;  // will be used later
+                    msg.cargoId = -1;  // will be used later
+                    memset(msg.padding, 0, sizeof(msg.padding));
+
+                    if (msgsnd(mainMsgQueueId, &msg, sizeof(msg) - sizeof(long), 0) == -1) {
+                        perror("Failed to send docking message");
+                    } else {
+                        printf("🛳️  Timestep %d: Docked ship %d at dock %d (category %d)\n",
+                               timestep, ship->shipId, dock->dockId, ship->shipCategory);
+                    }
+
+                    assigned = 1;
+                    break;
+                }
+            }
+
+            if (!assigned) {
+                printf("⌛ Timestep %d: Ship %d is waiting (category %d)\n",
+                       timestep, ship->shipId, ship->shipCategory);
+            }
+        }
+
+        updateShipWaitingTimes(sharedMemory->newShipRequests, sharedMemory->numShipRequests);
+        
+        MessageStruct endOfTimestepMsg;
+        endOfTimestepMsg.mtype = 5;
+
+        if (msgsnd(mainMsgQueueId, &endOfTimestepMsg, 0, 0) == -1) {
+            perror("❌ Failed to notify validation of timestep completion");
+        } else {
+            printf("✅ Notified validation of timestep %d completion\n", timestep);
+        }
+
+
+        sleep(1);
+    }
 
     return 0;
 }
+
 
