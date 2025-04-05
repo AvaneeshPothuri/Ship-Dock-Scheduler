@@ -70,6 +70,38 @@ typedef struct {
     int guessIsCorrect;
 } SolverResponse;
 
+void initializeDockStatuses(DockStatus dockStatuses[], Dock docks[], int numDocks) {
+    for (int i = 0; i < numDocks; i++) {
+        dockStatuses[i].dockId = docks[i].id;
+        dockStatuses[i].maxShipCategory = docks[i].category;
+        dockStatuses[i].numCranes = 0;
+        dockStatuses[i].isOccupied = 0;
+        dockStatuses[i].shipId = -1;
+        dockStatuses[i].shipDirection = -1;
+        dockStatuses[i].cargoHandled = 0;
+        dockStatuses[i].cargoTotal = 0;
+        for (int j = 0; j < 10; j++) {
+            dockStatuses[i].craneCapacities[j] = 0;
+        }
+    }
+}
+
+void printShipRequests(ShipRequest shipRequests[], int numRequests) {
+    for (int i = 0; i < numRequests; i++) {
+        printf("Ship ID: %d, Direction: %d, Category: %d, Cargo Items: %d\n",
+            shipRequests[i].shipId,
+            shipRequests[i].direction,
+            shipRequests[i].shipCategory,
+            shipRequests[i].numCargoItems);
+    }
+}
+
+void updateShipWaitingTimes(ShipRequest shipRequests[], int numRequests) {
+    for (int i = 0; i < numRequests; i++) {
+        shipRequests[i].currentWaitingTime++;
+    }
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <testcase_number>\n", argv[0]);
@@ -103,7 +135,7 @@ int main(int argc, char* argv[]) {
 
     fclose(file);
 
-    printf("✔️ input.txt read successfully from %s\n", inputPath);
+    printf("\u2714\ufe0f input.txt read successfully from %s\n", inputPath);
     printf("Shared Memory Key: %d\n", shmKey);
     printf("Main Message Queue Key: %d\n", mainMsgQueueKey);
     printf("Number of Solvers: %d\n", numSolvers);
@@ -142,8 +174,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("✔️ IPC mechanisms set up successfully.\n");
+    DockStatus dockStatuses[MAX_DOCKS];
+    initializeDockStatuses(dockStatuses, docks, numDocks);
+
+    printf("\u2714\ufe0f IPC mechanisms set up successfully.\n");
     printf("Scheduler setup complete. Ready to start scheduling loop...\n");
+
+    printShipRequests(sharedMemory->newShipRequests, sharedMemory->numShipRequests);
 
     return 0;
 }
