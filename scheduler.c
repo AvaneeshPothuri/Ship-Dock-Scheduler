@@ -10,10 +10,9 @@
 
 #define MAX_DOCKS 100
 #define MAX_SOLVERS 100
-#define MAX_AUTH_STRING_LEN 10
+#define MAX_AUTH_STRING_LEN 100
 #define MAX_NEW_REQUESTS 100
-#define MAX_CARGO_COUNT 10
-
+#define MAX_CARGO_COUNT 200
 
 typedef struct {
     int id;
@@ -109,27 +108,15 @@ int main(int argc, char* argv[]) {
     Dock docks[MAX_DOCKS];
 
     fscanf(file, "%d", &shmKey);
-    
     fscanf(file, "%d", &mainMsgQueueKey);
     fscanf(file, "%d", &numSolvers);
-
-    printf("📨 Main Message Queue Key: %d\n", mainMsgQueueKey);
-    printf("🧠 Number of Solver Queues: %d\n", numSolvers);
 
     for (int i = 0; i < numSolvers; i++) {
         fscanf(file, "%d", &solverQueueKeys[i]);
     }
-    printf("🧩 Solver Message Queue Keys: ");
-    for (int i = 0; i < numSolvers; i++) {
-        printf("%d ", solverQueueKeys[i]);
-    }
-    printf("\n");
 
     fscanf(file, "%d", &numDocks);
-    printf("🚢 Number of Docks: %d\n", numDocks);
-
-    int ch;
-    while ((ch = fgetc(file)) != '\n' && ch != EOF);
+    while (fgetc(file) != '\n' && !feof(file));
 
     DockStatus dockStatuses[MAX_DOCKS];
 
@@ -142,50 +129,45 @@ int main(int argc, char* argv[]) {
         dockStatuses[i].cargoTotal = 0;
 
         char line[256];
-        if (fgets(line, sizeof(line), file) == NULL) {
+        if (!fgets(line, sizeof(line), file)) {
             fprintf(stderr, "Error reading dock line %d\n", i + 1);
             exit(1);
         }
 
         char* token = strtok(line, " \t\n");
         int count = 0;
-        while (token != NULL) {
+        while (token) {
             int val = atoi(token);
             if (count == 0) {
-                dockStatuses[i].maxShipCategory = val;  // First number is category
+                dockStatuses[i].maxShipCategory = val;
             } else {
                 dockStatuses[i].craneCapacities[count - 1] = val;
             }
             count++;
             token = strtok(NULL, " \t\n");
         }
-        dockStatuses[i].numCranes = count - 1;  // Exclude the category
-    }
-
-    printf("🛠️  Dock Details:\n");
-    for (int i = 0; i < numDocks; i++) {
-        printf("    - Dock ID: %d | Category: %d | Cranes (%d): ",
-               dockStatuses[i].dockId,
-               dockStatuses[i].maxShipCategory,
-               dockStatuses[i].numCranes);
-        for (int j = 0; j < dockStatuses[i].numCranes; j++) {
-            printf("%d ", dockStatuses[i].craneCapacities[j]);
-        }
-        printf("\n");
+        dockStatuses[i].numCranes = count - 1;
     }
 
     fclose(file);
 
-    printf("✔️ input.txt read successfully from %s\n", inputPath);
-    printf("IPC setup starting...\n");
-
-    int shmId = shmget(shmKey, sizeof(MainSharedMemory), 0666);
+    int shmId = shmget(shmKey, 0, 0);
     if (shmId == -1) {
         perror("Failed to get shared memory segment");
         exit(EXIT_FAILURE);
     }
+    printf("📦 Using shmKey: %d (expected from input.txt)\n", shmKey);
 
     MainSharedMemory* sharedMemory = (MainSharedMemory*)shmat(shmId, NULL, 0);
+    printf("📦 Attached to shared memory. Verifying contents...\n");
+
+    for (int i = 0; i < 5; i++) {
+        printf("SharedMem Check [%d] ShipID: %d, Cat: %d\n",
+               i,
+               sharedMemory->newShipRequests[i].shipId,
+               sharedMemory->newShipRequests[i].category);
+    }
+
     if (sharedMemory == (void*)-1) {
         perror("Failed to attach shared memory");
         exit(EXIT_FAILURE);
@@ -207,10 +189,6 @@ int main(int argc, char* argv[]) {
     }
 
     initializeDockStatuses(dockStatuses, docks, numDocks);
-
-    printf("✔️ IPC mechanisms set up successfully.\n");
-
-    int timestep = 0;
     printf("🚢 Starting ship reading loop (print-only mode)...\n");
 
     while (1) {
@@ -222,21 +200,25 @@ int main(int argc, char* argv[]) {
         }
 
         int timestep = validationMsg.timestep;
-        int numRequests = validationMsg.numShipRequests;  // now from the union
-
+        int numRequests = validationMsg.numShipRequests;
 
         printf("⏳ Timestep: %d | Ship Requests Received: %d\n", timestep, numRequests);
 
-        // Exit condition
-        if (numRequests == 0 && validationMsg.timestep == -1) {
+        if (numRequests == 0 && timestep == -1) {
             printf("🛑 Simulation end signal received.\n");
             break;
         }
 
-        // Print all ship requests
         for (int i = 0; i < numRequests; i++) {
             ShipRequest req = sharedMemory->newShipRequests[i];
-            printf("🚢 Ship ID: %d | Direction: %d | Category: %d | Max Wait: %d | Current Wait: %d | Auth: %s | Cargo: ", req.shipId, req.direction, req.category, req.waitingTime, req.waitingTime, sharedMemory->authStrings[req.shipId]);
+
+            if (req.shipId == 0 && req.category == 0 && req.waitingTime == 0 && req.numCargo == 0) {
+                printf("⚠️ Warning: Possible empty/default request detected\n");
+            }
+
+            printf("🚢 Ship ID: %d | Direction: %d | Category: %d | Emergency: %d | Max Wait: %d | Current Wait: %d | Cargo: ",
+                   req.shipId, req.direction, req.category, req.emergency,
+                   req.waitingTime, req.waitingTime);
 
             for (int j = 0; j < req.numCargo; j++) {
                 printf("%d ", req.cargo[j]);
@@ -244,7 +226,6 @@ int main(int argc, char* argv[]) {
             printf("\n");
         }
 
-        // Notify end of timestep
         MessageStruct endMsg;
         endMsg.mtype = 5;
         if (msgsnd(mainMsgQueueId, &endMsg, 0, 0) == -1) {
@@ -253,8 +234,9 @@ int main(int argc, char* argv[]) {
             printf("✅ Timestep %d processing done\n", timestep);
         }
 
-        sleep(1);  // Optional: simulate time delay
+        sleep(1);
     }
 
     return 0;
 }
+
