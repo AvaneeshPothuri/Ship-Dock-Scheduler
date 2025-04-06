@@ -10,22 +10,28 @@
 
 #define MAX_DOCKS 100
 #define MAX_SOLVERS 100
+#define MAX_AUTH_STRING_LEN 10
+#define MAX_NEW_REQUESTS 100
+#define MAX_CARGO_COUNT 10
+
 
 typedef struct {
     int id;
     int category;
 } Dock;
 
-typedef struct {
+typedef struct MessageStruct {
     long mtype;
     int timestep;
-    int numShipRequests;
-    int dockId;
     int shipId;
     int direction;
-    int craneId;
+    int dockId;
     int cargoId;
-    char padding[200];
+    int isFinished;
+    union {
+        int numShipRequests;
+        int craneId;
+    };
 } MessageStruct;
 
 typedef struct {
@@ -40,23 +46,20 @@ typedef struct {
     int cargoTotal;
 } DockStatus;
 
-typedef struct {
+typedef struct ShipRequest {
     int shipId;
+    int timestep;
+    int category;
     int direction;
-    int shipCategory;
-    int numCargoItems;
-    int cargoWeights[10];
-    int maxWaitingTime;
-    int currentWaitingTime;
-    char authString[10];
+    int emergency;
+    int waitingTime;
+    int numCargo;
+    int cargo[MAX_CARGO_COUNT];
 } ShipRequest;
 
-typedef struct {
-    int timestep;
-    int numShipRequests;
-    ShipRequest newShipRequests[100];
-    DockStatus dockStatuses[100];
-    char authStrings[100][10];
+typedef struct MainSharedMemory {
+    char authStrings[MAX_DOCKS][MAX_AUTH_STRING_LEN];
+    ShipRequest newShipRequests[MAX_NEW_REQUESTS];
 } MainSharedMemory;
 
 typedef struct {
@@ -208,116 +211,49 @@ int main(int argc, char* argv[]) {
     printf("✔️ IPC mechanisms set up successfully.\n");
 
     int timestep = 0;
-    printf("🚢 Starting scheduling loop...\n");
-
-    ShipRequest waitingShips[100];
-    int waitingCount = 0;
-    
-    int lastTimestep = -1;
-    timestep = sharedMemory->timestep;
+    printf("🚢 Starting ship reading loop (print-only mode)...\n");
 
     while (1) {
-        printf("⏳ Timestep: %d | Num Requests: %d\n", timestep, sharedMemory->numShipRequests);
-        int numRequests = sharedMemory->numShipRequests;
+        MessageStruct validationMsg;
+        ssize_t msgSize = sizeof(MessageStruct) - sizeof(long);
+        if (msgrcv(mainMsgQueueId, &validationMsg, msgSize, 1, 0) == -1) {
+            perror("❌ Failed to receive message from validation");
+            exit(EXIT_FAILURE);
+        }
 
-        if (numRequests == 0 && timestep > 0) {
-            printf("⏹️  No more ship requests. Terminating.\n");
+        int timestep = validationMsg.timestep;
+        int numRequests = validationMsg.numShipRequests;  // now from the union
+
+
+        printf("⏳ Timestep: %d | Ship Requests Received: %d\n", timestep, numRequests);
+
+        // Exit condition
+        if (numRequests == 0 && validationMsg.timestep == -1) {
+            printf("🛑 Simulation end signal received.\n");
             break;
         }
 
-        // Add new arrivals to waitingShips
+        // Print all ship requests
         for (int i = 0; i < numRequests; i++) {
-            waitingShips[waitingCount++] = sharedMemory->newShipRequests[i];
-        }
+            ShipRequest req = sharedMemory->newShipRequests[i];
+            printf("🚢 Ship ID: %d | Direction: %d | Category: %d | Max Wait: %d | Current Wait: %d | Auth: %s | Cargo: ", req.shipId, req.direction, req.category, req.waitingTime, req.waitingTime, sharedMemory->authStrings[req.shipId]);
 
-        // Update waiting times
-        for (int i = 0; i < waitingCount; i++) {
-            waitingShips[i].currentWaitingTime++;
-        }
-
-        // Remove expired ships
-        int newWaitingCount = 0;
-        for (int i = 0; i < waitingCount; i++) {
-            if (waitingShips[i].currentWaitingTime <= waitingShips[i].maxWaitingTime) {
-                waitingShips[newWaitingCount++] = waitingShips[i];
-            } else {
-                printf("❌ Ship %d expired and was removed\n", waitingShips[i].shipId);
+            for (int j = 0; j < req.numCargo; j++) {
+                printf("%d ", req.cargo[j]);
             }
-        }
-        waitingCount = newWaitingCount;
-
-        // Sort waitingShips based on FCFS and priority logic
-        for (int i = 0; i < waitingCount - 1; i++) {
-            for (int j = i + 1; j < waitingCount; j++) {
-                if ((waitingShips[i].shipCategory > waitingShips[j].shipCategory) ||
-                    (waitingShips[i].shipCategory == waitingShips[j].shipCategory &&
-                     waitingShips[i].currentWaitingTime < waitingShips[j].currentWaitingTime)) {
-                    ShipRequest temp = waitingShips[i];
-                    waitingShips[i] = waitingShips[j];
-                    waitingShips[j] = temp;
-                }
-            }
+            printf("\n");
         }
 
-        // Assign ships to docks
-        for (int i = 0; i < waitingCount; i++) {
-            ShipRequest* ship = &waitingShips[i];
-            int assigned = 0;
-
-            for (int j = 0; j < numDocks; j++) {
-                DockStatus* dock = &dockStatuses[j];
-
-                if (!dock->isOccupied && dock->maxShipCategory >= ship->shipCategory) {
-                    dock->isOccupied = 1;
-                    dock->shipId = ship->shipId;
-                    dock->shipDirection = ship->direction;
-                    dock->cargoTotal = ship->numCargoItems;
-                    strncpy(sharedMemory->authStrings[dock->dockId], ship->authString, 10);
-
-                    MessageStruct msg;
-                    msg.mtype = 1;
-                    msg.timestep = timestep;
-                    msg.numShipRequests = 1;
-                    msg.dockId = dock->dockId;
-                    msg.shipId = ship->shipId;
-                    msg.direction = ship->direction;
-                    msg.craneId = -1;
-                    msg.cargoId = -1;
-                    memset(msg.padding, 0, sizeof(msg.padding));
-
-                    if (msgsnd(mainMsgQueueId, &msg, sizeof(msg) - sizeof(long), 0) == -1) {
-                        perror("Failed to send docking message");
-                    } else {
-                        printf("🛳️  Timestep %d: Docked ship %d at dock %d (category %d)\n",
-                               timestep, ship->shipId, dock->dockId, ship->shipCategory);
-                    }
-
-                    assigned = 1;
-                    break;
-                }
-            }
-
-            if (!assigned) {
-                printf("⌛ Timestep %d: Ship %d is waiting (category %d)\n",
-                       timestep, ship->shipId, ship->shipCategory);
-            }
-        }
-
-        MessageStruct endOfTimestepMsg;
-        endOfTimestepMsg.mtype = 5;
-
-        if (msgsnd(mainMsgQueueId, &endOfTimestepMsg, 0, 0) == -1) {
+        // Notify end of timestep
+        MessageStruct endMsg;
+        endMsg.mtype = 5;
+        if (msgsnd(mainMsgQueueId, &endMsg, 0, 0) == -1) {
             perror("❌ Failed to notify validation of timestep completion");
         } else {
-            printf("✅ Notified validation of timestep %d completion\n", timestep);
-            timestep++;
+            printf("✅ Timestep %d processing done\n", timestep);
         }
 
-        while (sharedMemory->timestep == lastTimestep) {
-            usleep(1000);  // Sleep for 1ms
-        }
-        
-        sleep(1);
+        sleep(1);  // Optional: simulate time delay
     }
 
     return 0;
