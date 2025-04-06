@@ -212,19 +212,21 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < numRequests; i++) {
             ShipRequest req = sharedMemory->newShipRequests[i];
 
-            if (req.shipId == 0 && req.category == 0 && req.waitingTime == 0 && req.numCargo == 0) {
-                printf("⚠️ Warning: Possible empty/default request detected\n");
-            }
-
-            printf("🚢 Ship ID: %d | Direction: %d | Category: %d | Emergency: %d | Max Wait: %d | Current Wait: %d | Cargo: ",
-                   req.shipId, req.direction, req.category, req.emergency,
-                   req.waitingTime, req.waitingTime);
-
+            printf("📦 SharedMem Check [%d]\n", i);
+            printf("  Ship ID     : %d\n", req.shipId);
+            printf("  Timestep    : %d\n", req.timestep);
+            printf("  Category    : %d\n", req.category);
+            printf("  Direction   : %d\n", req.direction);
+            printf("  Emergency   : %d\n", req.emergency);
+            printf("  Wait Time   : %d\n", req.waitingTime);
+            printf("  Num Cargo   : %d\n", req.numCargo);
+            printf("  Cargo IDs   : ");
             for (int j = 0; j < req.numCargo; j++) {
                 printf("%d ", req.cargo[j]);
             }
             printf("\n");
         }
+
 
         MessageStruct endMsg;
         endMsg.mtype = 5;
