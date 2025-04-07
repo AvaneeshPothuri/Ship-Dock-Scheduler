@@ -214,7 +214,7 @@ int main(int argc, char* argv[]) {
             printf("  Emergency   : %d\n", req.emergency);
             printf("  Wait Time   : %d\n", req.waitingTime);
             printf("  Num Cargo   : %d\n", req.numCargo);
-            printf("  Cargo IDs   : ");
+            printf("  Cargo Sizes   : ");
             for (int j = 0; j < req.numCargo; j++) {
                 printf("%d ", req.cargo[j]);
             }
