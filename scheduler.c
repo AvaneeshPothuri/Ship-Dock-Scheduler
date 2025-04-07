@@ -106,6 +106,63 @@ void assignShipToDock(DockStatus* dock, ShipRequest* ship) {
     dock->cargoTotal = ship->numCargo;
 }
 
+int trySolveAuth(int solverQueueId, int dockId, const char* authString) {
+    SolverRequest req;
+    req.mtype = 1;
+    req.dockId = dockId;
+    strncpy(req.authStringGuess, authString, sizeof(req.authStringGuess));
+
+    if (msgsnd(solverQueueId, &req, sizeof(SolverRequest) - sizeof(long), 0) == -1) {
+        perror("❌ Failed to send auth guess to solver");
+        return 0;
+    }
+
+    SolverResponse resp;
+    if (msgrcv(solverQueueId, &resp, sizeof(SolverResponse) - sizeof(long), 2, 0) == -1) {
+        perror("❌ Failed to receive solver response");
+        return 0;
+    }
+
+    return resp.guessIsCorrect;
+}
+
+void handleUndocking(DockStatus docks[], int numDocks, MainSharedMemory* sharedMemory, int solverQueueIds[], int numSolvers) {
+    for (int i = 0; i < numDocks; i++) {
+        if (!docks[i].isOccupied) continue;
+
+        if (docks[i].cargoHandled >= docks[i].cargoTotal) {
+            printf("🚪 Initiating undocking for Ship %d at Dock %d...\n", docks[i].shipId, docks[i].dockId);
+
+            int dockId = docks[i].dockId;
+            char* actualAuth = sharedMemory->authStrings[dockId - 1];
+
+            int solved = 0;
+            for (int s = 0; s < numSolvers && !solved; s++) {
+                for (int j = 0; j < 1000 && !solved; j++) {  // Try dummy strings like AUTH0, AUTH1...
+                    char guess[10];
+                    snprintf(guess, sizeof(guess), "AUTH%d", j);
+                    if (trySolveAuth(solverQueueIds[s], dockId, guess)) {
+                        printf("✅ Solver %d authenticated Dock %d successfully with \"%s\"\n", s, dockId, guess);
+                        solved = 1;
+                    }
+                }
+            }
+
+            if (!solved) {
+                printf("❌ Failed to solve auth for Dock %d. Keeping dock occupied.\n", dockId);
+                continue;
+            }
+
+            printf("🔓 Undocking successful at Dock %d. Ship %d left.\n", dockId, docks[i].shipId);
+            docks[i].isOccupied = 0;
+            docks[i].shipId = -1;
+            docks[i].shipDirection = -1;
+            docks[i].cargoHandled = 0;
+            docks[i].cargoTotal = 0;
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <testcase_number>\n", argv[0]);
@@ -236,6 +293,57 @@ int main(int argc, char* argv[]) {
             printf("     ✅ Assigned to Dock %d (Max Category %d)\n", 
                    dockStatuses[dockIdx].dockId, dockStatuses[dockIdx].maxShipCategory);
         }
+        
+        for (int i = 0; i < numDocks; i++) {
+    if (!dockStatuses[i].isOccupied) continue;
+
+    int shipId = dockStatuses[i].shipId;
+    int direction = dockStatuses[i].shipDirection;
+    int cargoHandled = dockStatuses[i].cargoHandled;
+    int cargoTotal = dockStatuses[i].cargoTotal;
+
+    if (cargoHandled >= cargoTotal) continue;
+
+    ShipRequest* ship = NULL;
+    // Find ship request by ID
+    for (int j = 0; j < MAX_NEW_REQUESTS; j++) {
+        if (sharedMemory->newShipRequests[j].shipId == shipId) {
+            ship = &sharedMemory->newShipRequests[j];
+            break;
+        }
+    }
+
+    if (!ship) continue;
+
+    for (int c = 0; c < dockStatuses[i].numCranes; c++) {
+            if (cargoHandled >= cargoTotal) break;
+
+            int cargoWeight = ship->cargo[cargoHandled];
+            if (dockStatuses[i].craneCapacities[c] >= cargoWeight) {
+                MessageStruct msg;
+                msg.mtype = 4;
+                msg.timestep = timestep;
+                msg.shipId = shipId;
+                msg.direction = direction;
+                msg.dockId = dockStatuses[i].dockId;
+                msg.cargoId = cargoHandled;
+                msg.craneId = c;
+                msg.isFinished = 0;
+
+                if (msgsnd(mainMsgQueueId, &msg, sizeof(MessageStruct) - sizeof(long), 0) == -1) {
+                    perror("❌ Failed to send cargo handling message");
+                } else {
+                    dockStatuses[i].cargoHandled++;
+                    printf("⚙️  Crane %d moved cargo %d (Weight: %d) at Dock %d for Ship %d\n", 
+                            c, cargoHandled, cargoWeight, dockStatuses[i].dockId, shipId);
+                    cargoHandled = dockStatuses[i].cargoHandled;
+                }
+            }
+        }
+    }
+
+        
+        handleUndocking(dockStatuses, numDocks, sharedMemory, solverQueueIds, numSolvers);
 
         MessageStruct endMsg;
         endMsg.mtype = 5;
