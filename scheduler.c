@@ -72,20 +72,38 @@ typedef struct {
     int guessIsCorrect;
 } SolverResponse;
 
-void initializeDockStatuses(DockStatus dockStatuses[], Dock docks[], int numDocks) {
+int compareShipRequests(const void* a, const void* b) {
+    ShipRequest* reqA = (ShipRequest*)a;
+    ShipRequest* reqB = (ShipRequest*)b;
+
+    if (reqA->emergency != reqB->emergency) {
+        return reqB->emergency - reqA->emergency;
+    }
+    if (reqA->timestep != reqB->timestep) {
+        return reqA->timestep - reqB->timestep;
+    }
+    return reqA->shipId - reqB->shipId;
+}
+
+void sortShipRequests(ShipRequest requests[], int count) {
+    qsort(requests, count, sizeof(ShipRequest), compareShipRequests);
+}
+
+int findSuitableDock(DockStatus docks[], int numDocks, ShipRequest* ship) {
     for (int i = 0; i < numDocks; i++) {
-        dockStatuses[i].dockId = docks[i].id;
-        dockStatuses[i].maxShipCategory = docks[i].category;
-        dockStatuses[i].numCranes = 0;
-        dockStatuses[i].isOccupied = 0;
-        dockStatuses[i].shipId = -1;
-        dockStatuses[i].shipDirection = -1;
-        dockStatuses[i].cargoHandled = 0;
-        dockStatuses[i].cargoTotal = 0;
-        for (int j = 0; j < 10; j++) {
-            dockStatuses[i].craneCapacities[j] = 0;
+        if (!docks[i].isOccupied && docks[i].maxShipCategory >= ship->category) {
+            return i;
         }
     }
+    return -1;
+}
+
+void assignShipToDock(DockStatus* dock, ShipRequest* ship) {
+    dock->isOccupied = 1;
+    dock->shipId = ship->shipId;
+    dock->shipDirection = ship->direction;
+    dock->cargoHandled = 0;
+    dock->cargoTotal = ship->numCargo;
 }
 
 int main(int argc, char* argv[]) {
@@ -110,7 +128,6 @@ int main(int argc, char* argv[]) {
     fscanf(file, "%d", &shmKey);
     fscanf(file, "%d", &mainMsgQueueKey);
     fscanf(file, "%d", &numSolvers);
-
     for (int i = 0; i < numSolvers; i++) {
         fscanf(file, "%d", &solverQueueKeys[i]);
     }
@@ -119,7 +136,6 @@ int main(int argc, char* argv[]) {
     while (fgetc(file) != '\n' && !feof(file));
 
     DockStatus dockStatuses[MAX_DOCKS];
-
     for (int i = 0; i < numDocks; i++) {
         dockStatuses[i].dockId = i + 1;
         dockStatuses[i].isOccupied = 0;
@@ -148,7 +164,6 @@ int main(int argc, char* argv[]) {
         }
         dockStatuses[i].numCranes = count - 1;
     }
-
     fclose(file);
 
     int shmId = shmget(shmKey, sizeof(MainSharedMemory), IPC_CREAT | 0666);
@@ -162,10 +177,6 @@ int main(int argc, char* argv[]) {
         perror("❌ Failed to attach shared memory");
         exit(EXIT_FAILURE);
     }
-
-    printf("📦 Using shmKey: %d (expected from input.txt)\n", shmKey);
-    printf("📦 Shared memory segment created or found and attached.\n");
-
 
     int mainMsgQueueId = msgget(mainMsgQueueKey, 0666);
     if (mainMsgQueueId == -1) {
@@ -182,8 +193,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    initializeDockStatuses(dockStatuses, docks, numDocks);
-    printf("🚢 Starting ship reading loop (print-only mode)...\n");
+    printf("🚢 Starting scheduler loop...\n");
 
     while (1) {
         MessageStruct validationMsg;
@@ -196,29 +206,35 @@ int main(int argc, char* argv[]) {
         int timestep = validationMsg.timestep;
         int numRequests = validationMsg.numShipRequests;
 
-        printf("⏳ Timestep: %d | Ship Requests Received: %d\n", timestep, numRequests);
-
         if (numRequests == 0 && timestep == -1) {
             printf("🛑 Simulation end signal received.\n");
             break;
         }
 
-        for (int i = 0; i < numRequests; i++) {
-            ShipRequest req = sharedMemory->newShipRequests[i];
+        printf("\n⏳ Timestep: %d | Ship Requests Received: %d\n", timestep, numRequests);
 
-            printf("📦 SharedMem Check [%d]\n", i);
-            printf("  Ship ID     : %d\n", req.shipId);
-            printf("  Timestep    : %d\n", req.timestep);
-            printf("  Category    : %d\n", req.category);
-            printf("  Direction   : %d\n", req.direction);
-            printf("  Emergency   : %d\n", req.emergency);
-            printf("  Wait Time   : %d\n", req.waitingTime);
-            printf("  Num Cargo   : %d\n", req.numCargo);
-            printf("  Cargo Sizes   : ");
-            for (int j = 0; j < req.numCargo; j++) {
-                printf("%d ", req.cargo[j]);
+        ShipRequest incomingRequests[MAX_NEW_REQUESTS];
+        for (int i = 0; i < numRequests; i++) {
+            incomingRequests[i] = sharedMemory->newShipRequests[i];
+        }
+
+        sortShipRequests(incomingRequests, numRequests);
+        printf("📋 Sorted %d ship requests (Emergency → FCFS):\n", numRequests);
+
+        for (int i = 0; i < numRequests; i++) {
+            ShipRequest* req = &incomingRequests[i];
+            printf("  🚢 Ship ID %d | Timestep %d | Emergency %d | Category %d\n", 
+                   req->shipId, req->timestep, req->emergency, req->category);
+
+            int dockIdx = findSuitableDock(dockStatuses, numDocks, req);
+            if (dockIdx == -1) {
+                printf("     ❌ No suitable dock available.\n");
+                continue;
             }
-            printf("\n");
+
+            assignShipToDock(&dockStatuses[dockIdx], req);
+            printf("     ✅ Assigned to Dock %d (Max Category %d)\n", 
+                   dockStatuses[dockIdx].dockId, dockStatuses[dockIdx].maxShipCategory);
         }
 
         MessageStruct endMsg;
@@ -229,7 +245,6 @@ int main(int argc, char* argv[]) {
             printf("✅ Timestep %d processing done\n", timestep);
         }
     }
-
 
     return 0;
 }
