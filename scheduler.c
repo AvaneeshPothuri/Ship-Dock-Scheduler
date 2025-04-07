@@ -46,6 +46,8 @@ typedef struct {
     int cargoHandled;
     int cargoTotal;
     int dockedAtTimestep;
+    int cargo[MAX_CARGO_COUNT];
+    int numCargo;
 } DockStatus;
 
 typedef struct ShipRequest {
@@ -113,8 +115,12 @@ void assignShipToDock(DockStatus* dock, ShipRequest* ship, int currentTimestep) 
     dock->cargoHandled = 0;
     dock->cargoTotal = ship->numCargo;
     dock->dockedAtTimestep = currentTimestep;
+    dock->numCargo = ship->numCargo;
+    
+    for (int i = 0; i < ship->numCargo; i++) {
+        dock->cargo[i] = ship->cargo[i];
+    }
 }
-
 
 int trySolveAuth(int solverQueueId, int dockId, const char* authString) {
     SolverRequest req;
@@ -320,6 +326,11 @@ int main(int argc, char* argv[]) {
             ShipRequest* req = &incomingRequests[i];
             printf("  🚢 Ship ID %d | Timestep %d | Emergency %d | Category %d\n", 
                    req->shipId, req->timestep, req->emergency, req->category);
+            printf("     📦 Cargo Weights: ");
+            for (int c = 0; c < req->numCargo; c++) {
+                printf("%d ", req->cargo[c]);
+            }
+            printf("\n");
 
             int dockIdx = findSuitableDock(dockStatuses, numDocks, req);
             if (dockIdx == -1) {
@@ -327,7 +338,7 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            assignShipToDock(&dockStatuses[dockIdx], req, timestep);
+            assignShipToDock(&dockStatuses[dockIdx], &incomingRequests[i], timestep);
             MessageStruct response;
             response.mtype = 2;
             response.timestep = timestep;
@@ -336,19 +347,17 @@ int main(int argc, char* argv[]) {
             response.direction = req->direction;
             response.isFinished = 0;
 
-if (msgsnd(mainMsgQueueId, &response, sizeof(MessageStruct) - sizeof(long), 0) == -1) {
-    perror("❌ Failed to send docking confirmation to validation");
-}
+            if (msgsnd(mainMsgQueueId, &response, sizeof(MessageStruct) - sizeof(long), 0) == -1) {
+                perror("❌ Failed to send docking confirmation to validation");
+            }
+
             printf("     ✅ Assigned to Dock %d (Max Category %d)\n", 
                    dockStatuses[dockIdx].dockId, dockStatuses[dockIdx].maxShipCategory);
         }
 
         for (int i = 0; i < numDocks; i++) {
             if (!dockStatuses[i].isOccupied) continue;
-            if (dockStatuses[i].dockedAtTimestep == timestep) {
-                  continue;
-              }
-
+            if (dockStatuses[i].dockedAtTimestep == timestep) continue;
 
             int shipId = dockStatuses[i].shipId;
             int direction = dockStatuses[i].shipDirection;
@@ -370,7 +379,8 @@ if (msgsnd(mainMsgQueueId, &response, sizeof(MessageStruct) - sizeof(long), 0) =
             for (int c = 0; c < dockStatuses[i].numCranes; c++) {
                 if (cargoHandled >= cargoTotal) break;
 
-                int cargoWeight = ship->cargo[cargoHandled];
+                int cargoWeight = dockStatuses[i].cargo[cargoHandled];
+
                 if (dockStatuses[i].craneCapacities[c] >= cargoWeight) {
                     MessageStruct msg;
                     msg.mtype = 4;
@@ -387,7 +397,7 @@ if (msgsnd(mainMsgQueueId, &response, sizeof(MessageStruct) - sizeof(long), 0) =
                     } else {
                         dockStatuses[i].cargoHandled++;
                         printf("⚙️  Crane %d moved cargo %d (Weight: %d) at Dock %d for Ship %d\n", 
-                                c, cargoHandled, cargoWeight, dockStatuses[i].dockId, shipId);
+                               c, cargoHandled, cargoWeight, dockStatuses[i].dockId, shipId);
                         cargoHandled = dockStatuses[i].cargoHandled;
                     }
                 }
