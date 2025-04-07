@@ -8,8 +8,8 @@
 #include <unistd.h>
 #include <errno.h>
 
-#define MAX_DOCKS 100
-#define MAX_SOLVERS 100
+#define MAX_DOCKS 30
+#define MAX_SOLVERS 8
 #define MAX_AUTH_STRING_LEN 100
 #define MAX_NEW_REQUESTS 100
 #define MAX_CARGO_COUNT 200
@@ -151,27 +151,21 @@ int main(int argc, char* argv[]) {
 
     fclose(file);
 
-    int shmId = shmget(shmKey, 0, 0);
+    int shmId = shmget(shmKey, sizeof(MainSharedMemory), IPC_CREAT | 0666);
     if (shmId == -1) {
-        perror("Failed to get shared memory segment");
+        perror("❌ Failed to create/get shared memory segment");
         exit(EXIT_FAILURE);
     }
-    printf("📦 Using shmKey: %d (expected from input.txt)\n", shmKey);
 
     MainSharedMemory* sharedMemory = (MainSharedMemory*)shmat(shmId, NULL, 0);
-    printf("📦 Attached to shared memory. Verifying contents...\n");
-
-    for (int i = 0; i < 5; i++) {
-        printf("SharedMem Check [%d] ShipID: %d, Cat: %d\n",
-               i,
-               sharedMemory->newShipRequests[i].shipId,
-               sharedMemory->newShipRequests[i].category);
-    }
-
     if (sharedMemory == (void*)-1) {
-        perror("Failed to attach shared memory");
+        perror("❌ Failed to attach shared memory");
         exit(EXIT_FAILURE);
     }
+
+    printf("📦 Using shmKey: %d (expected from input.txt)\n", shmKey);
+    printf("📦 Shared memory segment created or found and attached.\n");
+
 
     int mainMsgQueueId = msgget(mainMsgQueueKey, 0666);
     if (mainMsgQueueId == -1) {
@@ -227,7 +221,6 @@ int main(int argc, char* argv[]) {
             printf("\n");
         }
 
-
         MessageStruct endMsg;
         endMsg.mtype = 5;
         if (msgsnd(mainMsgQueueId, &endMsg, 0, 0) == -1) {
@@ -235,9 +228,8 @@ int main(int argc, char* argv[]) {
         } else {
             printf("✅ Timestep %d processing done\n", timestep);
         }
-
-        sleep(1);
     }
+
 
     return 0;
 }
