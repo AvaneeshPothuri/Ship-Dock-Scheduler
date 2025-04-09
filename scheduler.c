@@ -48,6 +48,7 @@ typedef struct {
     int dockedAtTimestep;
     int cargo[MAX_CARGO_COUNT];
     int numCargo;
+    int lastCargoMovedTimestep;
 } DockStatus;
 
 typedef struct ShipRequest {
@@ -142,39 +143,84 @@ int trySolveAuth(int solverQueueId, int dockId, const char* authString) {
     return resp.guessIsCorrect;
 }
 
-void handleUndocking(DockStatus docks[], int numDocks, MainSharedMemory* sharedMemory, int solverQueueIds[], int numSolvers) {
+void handleUndocking(DockStatus docks[], int numDocks, MainSharedMemory* sharedMemory,
+                     int solverQueueIds[], int numSolvers, int mainMsgQueueId, int currentTimestep) {
     for (int i = 0; i < numDocks; i++) {
         if (!docks[i].isOccupied) continue;
+        if (docks[i].cargoHandled < docks[i].cargoTotal) continue;
+        if (docks[i].lastCargoMovedTimestep == currentTimestep) continue;
 
-        if (docks[i].cargoHandled >= docks[i].cargoTotal) {
-            printf("🚪 Initiating undocking for Ship %d at Dock %d...\n", docks[i].shipId, docks[i].dockId);
+        int dockId = docks[i].dockId;
+        int shipId = docks[i].shipId;
+        int dockedTime = docks[i].dockedAtTimestep;
+        int duration = currentTimestep - dockedTime;
 
-            int dockId = docks[i].dockId;
-            char* actualAuth = sharedMemory->authStrings[dockId];
+        if (duration <= 0) continue;
 
-            int solved = 0;
-            for (int s = 0; s < numSolvers && !solved; s++) {
-                for (int j = 0; j < 1000 && !solved; j++) {  
-                    char guess[10];
-                    snprintf(guess, sizeof(guess), "AUTH%d", j);
-                    if (trySolveAuth(solverQueueIds[s], dockId, guess)) {
-                        printf("✅ Solver %d authenticated Dock %d successfully with \"%s\"\n", s, dockId, guess);
+        printf("🚪 Initiating undocking for Ship %d at Dock %d...\n", shipId, dockId);
+
+        for (int s = 0; s < numSolvers; s++) {
+            SolverRequest setupMsg = { .mtype = 1, .dockId = dockId };
+            memset(setupMsg.authStringGuess, 0, sizeof(setupMsg.authStringGuess));
+            msgsnd(solverQueueIds[s], &setupMsg, sizeof(SolverRequest) - sizeof(long), 0);
+        }
+
+        char charset[] = {'5', '6', '7', '8', '9', '.'};
+        char guess[duration + 1];
+        guess[duration] = '\0';
+
+        int solved = 0;
+
+        for (int s = 0; s < numSolvers && !solved; s++) {
+            for (int attempt = 0; attempt < 1000000 && !solved; attempt++) {
+                for (int j = 0; j < duration; j++) {
+                    guess[j] = charset[rand() % 6];
+                }
+
+                if (guess[0] == '.' || guess[duration - 1] == '.') continue;
+
+                SolverRequest guessMsg = { .mtype = 2, .dockId = dockId };
+                strncpy(guessMsg.authStringGuess, guess, sizeof(guessMsg.authStringGuess) - 1);
+                guessMsg.authStringGuess[sizeof(guessMsg.authStringGuess) - 1] = '\0';
+
+                msgsnd(solverQueueIds[s], &guessMsg, sizeof(SolverRequest) - sizeof(long), 0);
+
+                SolverResponse response;
+                if (msgrcv(solverQueueIds[s], &response, sizeof(SolverResponse) - sizeof(long), 3, 0) != -1) {
+                    if (response.guessIsCorrect == 1) {
                         solved = 1;
+                        strncpy(sharedMemory->authStrings[dockId], guess, MAX_AUTH_STRING_LEN - 1);
+                        sharedMemory->authStrings[dockId][MAX_AUTH_STRING_LEN - 1] = '\0';
+
+                        printf("✅ Correct auth string \"%s\" found by Solver %d for Dock %d\n", guess, s, dockId);
+
+                        MessageStruct undockMsg = {
+                            .mtype = 3,
+                            .timestep = currentTimestep,
+                            .shipId = shipId,
+                            .dockId = dockId,
+                            .direction = docks[i].shipDirection,
+                            .isFinished = 1
+                        };
+
+                        if (msgsnd(mainMsgQueueId, &undockMsg, sizeof(MessageStruct) - sizeof(long), 0) == -1) {
+                            perror("❌ Failed to send undocking message to validation");
+                        } else {
+                            printf("📤 Undocking message sent for Ship %d at Dock %d\n", shipId, dockId);
+                        }
+
+                        docks[i].isOccupied = 0;
+                        docks[i].shipId = -1;
+                        docks[i].shipDirection = -1;
+                        docks[i].cargoHandled = 0;
+                        docks[i].cargoTotal = 0;
                     }
                 }
             }
+        }
 
-            if (!solved) {
-                printf("❌ Failed to solve auth for Dock %d. Keeping dock occupied.\n", dockId);
-                continue;
-            }
-
-            printf("🔓 Undocking successful at Dock %d. Ship %d left.\n", dockId, docks[i].shipId);
-            docks[i].isOccupied = 0;
-            docks[i].shipId = -1;
-            docks[i].shipDirection = -1;
-            docks[i].cargoHandled = 0;
-            docks[i].cargoTotal = 0;
+        if (!solved) {
+            printf("❌ Failed to solve auth for Dock %d. Keeping dock occupied.\n", dockId);
         }
     }
 }
@@ -396,6 +442,7 @@ int main(int argc, char* argv[]) {
                         perror("❌ Failed to send cargo handling message");
                     } else {
                         dockStatuses[i].cargoHandled++;
+                        dockStatuses[i].lastCargoMovedTimestep = timestep;
                         printf("⚙️  Crane %d moved cargo %d (Weight: %d) at Dock %d for Ship %d\n", 
                                c, cargoHandled, cargoWeight, dockStatuses[i].dockId, shipId);
                         cargoHandled = dockStatuses[i].cargoHandled;
@@ -404,7 +451,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        handleUndocking(dockStatuses, numDocks, sharedMemory, solverQueueIds, numSolvers);
+        handleUndocking(dockStatuses, numDocks, sharedMemory, solverQueueIds, numSolvers, mainMsgQueueId, timestep);
 
         MessageStruct endMsg;
         endMsg.mtype = 5;
